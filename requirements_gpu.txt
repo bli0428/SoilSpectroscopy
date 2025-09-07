@@ -1,0 +1,23 @@
+# GPU-accelerated requirements for soil spectroscopy
+# Base requirements
+pandas>=1.5.0
+numpy>=1.21.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+scikit-learn>=1.1.0
+scipy>=1.9.0
+
+# GPU Libraries (install based on your system)
+# RAPIDS CuML (most comprehensive GPU ML library)
+# Install with: conda install -c rapidsai -c nvidia -c conda-forge cuml
+
+# XGBoost with GPU support
+xgboost>=1.6.0
+
+# PyTorch with CUDA (choose appropriate version)
+# For CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# For CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+
+# CuPy for GPU NumPy operations (optional but recommended)
+# Install with: pip install cupy-cuda11x (or cupy-cuda12x for CUDA 12)
