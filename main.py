@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import time
+from datetime import datetime
 from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.linear_model import Ridge, Lasso, ElasticNet
@@ -193,17 +195,17 @@ class SoilSpectroscopyPredictor:
             'Ridge': Ridge(alpha=1.0, random_state=42),
             
             # Tree-based Models
-            # 'RandomForest': RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
-            # 'GradientBoosting': GradientBoostingRegressor(n_estimators=100, random_state=42),
+            'RandomForest': RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1),
+            'GradientBoosting': GradientBoostingRegressor(n_estimators=100, random_state=42),
             
             # # Neural Network
-            # 'MLP': MLPRegressor(hidden_layer_sizes=(100, 50), max_iter=500, random_state=42),
+            'MLP': MLPRegressor(hidden_layer_sizes=(100, 50), max_iter=500, random_state=42),
             
             # # Support Vector Machine
-            # 'SVR': SVR(kernel='rbf', C=1.0, gamma='scale'),
+            'SVR': SVR(kernel='rbf', C=1.0, gamma='scale'),
 
-            # # 'Lasso': Lasso(alpha=0.1, random_state=42, max_iter=2000),
-            # 'ElasticNet': ElasticNet(alpha=0.1, l1_ratio=0.5, random_state=42, max_iter=2000)
+            'Lasso': Lasso(alpha=0.1, random_state=42, max_iter=2000),
+            'ElasticNet': ElasticNet(alpha=0.1, l1_ratio=0.5, random_state=42, max_iter=2000)
         }
         
         # Add GPU models if available and requested
@@ -223,20 +225,36 @@ class SoilSpectroscopyPredictor:
                 import xgboost as xgb
                 gpu_models['GPU_XGBoost'] = xgb.XGBRegressor(
                     n_estimators=100,
+                    max_depth=6,  # Limit tree depth
+                    learning_rate=0.1,  # Reduce learning rate
+                    subsample=0.8,  # Use 80% of samples
+                    colsample_bytree=0.8,  # Use 80% of features
+                    reg_alpha=0.1,  # L1 regularization
+                    reg_lambda=1.0,  # L2 regularization
                     tree_method='gpu_hist',  # GPU acceleration
                     gpu_id=0,
-                    random_state=42
+                    random_state=42,
+                    early_stopping_rounds=10,  # Stop if no improvement
+                    eval_metric='rmse'
                 )
-                print("✅ Added GPU XGBoost model")
+                print("✅ Added GPU XGBoost model with regularization")
             except Exception as e:
                 print(f"⚠️ XGBoost GPU not available: {e}")
-                # Fallback to CPU XGBoost
+                # Fallback to CPU XGBoost with same regularization
                 import xgboost as xgb
                 gpu_models['CPU_XGBoost'] = xgb.XGBRegressor(
                     n_estimators=100,
-                    random_state=42
+                    max_depth=6,
+                    learning_rate=0.1,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    reg_alpha=0.1,
+                    reg_lambda=1.0,
+                    random_state=42,
+                    early_stopping_rounds=10,
+                    eval_metric='rmse'
                 )
-                print("✅ Added CPU XGBoost model as fallback")
+                print("✅ Added CPU XGBoost model as fallback with regularization")
         
         # PyTorch Neural Network
         if self.gpu_available['pytorch']:
@@ -319,6 +337,7 @@ class SoilSpectroscopyPredictor:
         for name, model in models.items():
             print(f"Training {name}...")
             
+            start_time = time.time()
             try:
                 if name == 'GPU_Neural_Network':
                     # Special handling for PyTorch
@@ -358,6 +377,10 @@ class SoilSpectroscopyPredictor:
             except Exception as e:
                 print(f"  ❌ Error training {name}: {e}")
                 continue
+            
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            print(f"  Training time: {elapsed_time:.2f} seconds")
         
         return results
     
@@ -490,58 +513,161 @@ class SoilSpectroscopyPredictor:
         plt.savefig(f'model_comparison_{scaler_type}.png', dpi=300, bbox_inches='tight')
         plt.show()
     
+    def apply_bias_correction(self, y_true, y_pred, method='mean_offset'):
+        """Apply bias correction to predictions"""
+        if method == 'mean_offset':
+            # Calculate mean offset per wavelength
+            bias = np.mean(y_true - y_pred, axis=0)
+            y_pred_corrected = y_pred + bias
+            
+        elif method == 'median_offset':
+            # Use median for robustness to outliers
+            bias = np.median(y_true - y_pred, axis=0)
+            y_pred_corrected = y_pred + bias
+            
+        elif method == 'linear_correction':
+            # Fit linear correction: y_true = a * y_pred + b
+            from sklearn.linear_model import LinearRegression
+            lr = LinearRegression()
+            
+            # Fit correction for each wavelength
+            y_pred_corrected = np.zeros_like(y_pred)
+            correction_params = []
+            
+            for i in range(y_pred.shape[1]):
+                lr.fit(y_pred[:, i].reshape(-1, 1), y_true[:, i])
+                y_pred_corrected[:, i] = lr.predict(y_pred[:, i].reshape(-1, 1))
+                correction_params.append({'slope': lr.coef_[0], 'intercept': lr.intercept_})
+            
+            return y_pred_corrected, correction_params
+            
+        else:
+            raise ValueError("Method must be 'mean_offset', 'median_offset', or 'linear_correction'")
+        
+        return y_pred_corrected, bias
+    
+    def evaluate_with_bias_correction(self, y_true, y_pred, methods=['mean_offset', 'median_offset', 'linear_correction']):
+        """Evaluate different bias correction methods"""
+        print("  → Testing bias correction methods...")
+        
+        results = {}
+        original_r2 = r2_score(y_true, y_pred)
+        original_rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        
+        results['original'] = {
+            'r2': original_r2,
+            'rmse': original_rmse,
+            'y_pred': y_pred
+        }
+        
+        for method in methods:
+            try:
+                y_pred_corrected, correction_info = self.apply_bias_correction(y_true, y_pred, method)
+                
+                corrected_r2 = r2_score(y_true, y_pred_corrected)
+                corrected_rmse = np.sqrt(mean_squared_error(y_true, y_pred_corrected))
+                
+                results[method] = {
+                    'r2': corrected_r2,
+                    'rmse': corrected_rmse,
+                    'y_pred': y_pred_corrected,
+                    'correction_info': correction_info,
+                    'improvement_r2': corrected_r2 - original_r2,
+                    'improvement_rmse': original_rmse - corrected_rmse
+                }
+                
+                print(f"    {method}: R²={corrected_r2:.4f} (+{corrected_r2-original_r2:.4f}), RMSE={corrected_rmse:.4f} (-{original_rmse-corrected_rmse:.4f})")
+                
+            except Exception as e:
+                print(f"    {method}: Failed - {e}")
+                continue
+        
+        # Find best method
+        best_method = max([k for k in results.keys() if k != 'original'], 
+                         key=lambda x: results[x]['r2'])
+        
+        print(f"    Best correction: {best_method}")
+        return results, best_method
+    
     def run_complete_analysis(self):
         """Run the complete analysis pipeline"""
+        analysis_start_time = time.time()
+        
         print("="*60)
         print("SOIL SPECTROSCOPY: NIR to MIR PREDICTION ANALYSIS")
+        print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         if self.use_gpu:
             print("GPU ACCELERATION ENABLED")
             print(f"Available GPU libraries: XGBoost={self.gpu_available['xgboost']}, PyTorch={self.gpu_available['pytorch']}, CUDA={self.gpu_available['cuda']}")
         print("="*60)
         
         # Load and align data
+        print("\n🔄 PHASE 1: Data Loading and Alignment")
+        data_start = time.time()
         nir_cols, mir_cols = self.load_data()
         X, y = self.align_datasets(nir_cols, mir_cols)
+        data_time = time.time() - data_start
+        print(f"✅ Data preparation completed in {data_time:.2f}s")
         
         # Test different scaling approaches
         scaling_methods = ['standard', 'minmax', 'robust']
         all_results = {}
         
-        for scaler_type in scaling_methods:
+        print(f"\n🔄 PHASE 2: Model Training ({len(scaling_methods)} scaling methods)")
+        
+        for i, scaler_type in enumerate(scaling_methods, 1):
             print(f"\n{'='*40}")
-            print(f"ANALYSIS WITH {scaler_type.upper()} SCALING")
+            print(f"SCALING METHOD {i}/{len(scaling_methods)}: {scaler_type.upper()}")
             print(f"{'='*40}")
             
+            scaling_start = time.time()
+            
             # Preprocess data
+            print(f"🔄 Preprocessing with {scaler_type} scaling...")
             X_scaled, y_scaled = self.preprocess_data(X, y, scaler_type)
             
             # Split data
+            print("🔄 Splitting data into train/test sets...")
             X_train, X_test, y_train, y_test = train_test_split(
                 X_scaled, y_scaled, test_size=0.2, random_state=42
             )
             
             # Setup and train models
+            print("🔄 Setting up models...")
             models = self.setup_models()
+            
             results = self.train_models(X_train, X_test, y_train, y_test, models)
             
             # Store results
             all_results[scaler_type] = results
             
+            scaling_time = time.time() - scaling_start
+            print(f"✅ {scaler_type.upper()} scaling completed in {scaling_time:.2f}s")
+            
             # Plot results
+            print("🔄 Generating plots...")
+            plot_start = time.time()
             self.plot_results(results, scaler_type)
+            plot_time = time.time() - plot_start
+            print(f"✅ Plots generated in {plot_time:.2f}s")
         
         # PCA approach
         print(f"\n{'='*40}")
-        print("PCA DIMENSIONALITY REDUCTION APPROACH")
+        print("🔄 PHASE 3: PCA DIMENSIONALITY REDUCTION")
         print(f"{'='*40}")
         
+        pca_start = time.time()
         X_std, y_std = self.preprocess_data(X, y, 'standard')
         pca_results = self.dimensionality_reduction_approach(X_std, y_std)
+        pca_time = time.time() - pca_start
+        print(f"✅ PCA analysis completed in {pca_time:.2f}s")
         
         # Hyperparameter tuning for best model
         print(f"\n{'='*40}")
-        print("HYPERPARAMETER TUNING")
+        print("🔄 PHASE 4: HYPERPARAMETER TUNING")
         print(f"{'='*40}")
+        
+        tuning_start = time.time()
         
         # Use standard scaling for tuning
         X_scaled, y_scaled = self.preprocess_data(X, y, 'standard')
@@ -549,12 +675,17 @@ class SoilSpectroscopyPredictor:
             X_scaled, y_scaled, test_size=0.2, random_state=42
         )
         
+        print("🔄 Tuning Ridge regression...")
         tuned_ridge = self.hyperparameter_tuning(X_train, y_train, 'Ridge')
+        print("🔄 Tuning Random Forest...")
         tuned_rf = self.hyperparameter_tuning(X_train, y_train, 'RandomForest')
+        
+        tuning_time = time.time() - tuning_start
+        print(f"✅ Hyperparameter tuning completed in {tuning_time:.2f}s")
         
         # Final recommendations
         print(f"\n{'='*60}")
-        print("FINAL RECOMMENDATIONS")
+        print("🏆 FINAL RECOMMENDATIONS")
         print(f"{'='*60}")
         
         # Find best overall model
@@ -569,18 +700,23 @@ class SoilSpectroscopyPredictor:
                     best_scaler = scaler_type
                     best_model = model_name
         
-        print(f"Best Model: {best_model} with {best_scaler} scaling")
-        print(f"Best Test R²: {best_score:.4f}")
-        print(f"Best Test RMSE: {all_results[best_scaler][best_model]['test_rmse']:.4f}")
+        print(f"🥇 Best Model: {best_model} with {best_scaler} scaling")
+        print(f"📊 Best Test R²: {best_score:.4f}")
+        print(f"📊 Best Test RMSE: {all_results[best_scaler][best_model]['test_rmse']:.4f}")
         
         # GPU performance summary
         if self.use_gpu:
             gpu_models = [name for name in all_results[best_scaler].keys() if 'GPU' in name or 'XGBoost' in name]
             if gpu_models:
-                print(f"\nGPU Models Performance:")
+                print(f"\n🚀 GPU Models Performance:")
                 for model_name in gpu_models:
                     result = all_results[best_scaler][model_name]
-                    print(f"  {model_name}: R²={result['test_r2']:.4f}, RMSE={result['test_rmse']:.4f}")
+                    print(f"  • {model_name}: R²={result['test_r2']:.4f}, RMSE={result['test_rmse']:.4f}")
+        
+        # Total analysis time
+        total_analysis_time = time.time() - analysis_start_time
+        print(f"\n⏱️  TOTAL ANALYSIS TIME: {total_analysis_time:.2f} seconds ({total_analysis_time/60:.1f} minutes)")
+        print(f"🏁 Analysis completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         return all_results, pca_results
 
